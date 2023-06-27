@@ -31,33 +31,41 @@ public static class Program
             IsRequired = true
         };
 
-        var userCollectionOption = new Option<bool>(
-            name: "--user-collection",
-            description: "Save the extracted context to an isolated user collection.",
-            getDefaultValue: () => false
+        // TODO: UI to retrieve ChatID from the WebApp will be added in the future with multi-user support.
+        var chatCollectionOption = new Option<Guid>(
+            name: "--chat-id",
+            description: "Save the extracted context to an isolated chat collection.",
+            getDefaultValue: () => Guid.Empty
         );
 
         var rootCommand = new RootCommand(
             "This console app imports a file to the CopilotChat WebAPI's document memory store."
         )
         {
-            fileOption, userCollectionOption
+            fileOption, chatCollectionOption
         };
 
-        rootCommand.SetHandler(async (file, userCollection) =>
+        rootCommand.SetHandler(async (file, chatCollectionId) =>
             {
-                await UploadFileAsync(file, config!, userCollection);
+                await UploadFileAsync(file, config!, chatCollectionId);
             },
-            fileOption, userCollectionOption
+            fileOption, chatCollectionOption
         );
 
         rootCommand.Invoke(args);
     }
 
     /// <summary>
-    /// Acquires a user unique ID from Azure AD.
+    /// Acquires a user account from Azure AD.
     /// </summary>
-    private static async Task<string?> AcquireUserIdAsync(Config config)
+    /// <param name="config">The App configuration.</param>
+    /// <param name="setAccount">Sets the account to the first account found.</param>
+    /// <param name="setAccessToken">Sets the access token to the first account found.</param>
+    /// <returns>True if the user account was acquired.</returns>
+    private static async Task<bool> AcquireUserAccountAsync(
+        Config config,
+        Action<IAccount> setAccount,
+        Action<string> setAccessToken)
     {
         Console.WriteLine("Requesting User Account ID...");
 
@@ -74,15 +82,17 @@ public static class Program
             if (first is null)
             {
                 Console.WriteLine("Error: No accounts found");
-                return null;
+                return false;
             }
 
-            return first.HomeAccountId.Identifier;
+            setAccount(first);
+            setAccessToken(result.AccessToken);
+            return true;
         }
         catch (Exception ex) when (ex is MsalServiceException or MsalClientException)
         {
             Console.WriteLine($"Error: {ex.Message}");
-            return null;
+            return false;
         }
     }
 
@@ -91,8 +101,8 @@ public static class Program
     /// </summary>
     /// <param name="file">The file to upload for injection.</param>
     /// <param name="config">Configuration.</param>
-    /// <param name="toUserCollection">Save the extracted context to an isolated user collection.</param>
-    private static async Task UploadFileAsync(FileInfo file, Config config, bool toUserCollection)
+    /// <param name="chatCollectionId">Save the extracted context to an isolated chat collection.</param>
+    private static async Task UploadFileAsync(FileInfo file, Config config, Guid chatCollectionId)
     {
         if (!file.Exists)
         {
@@ -100,26 +110,39 @@ public static class Program
             return;
         }
 
+        IAccount? userAccount = null;
+        string? accessToken = null;
+
+        if (await AcquireUserAccountAsync(config, v => { userAccount = v; }, v => { accessToken = v; }) == false)
+        {
+            Console.WriteLine("Error: Failed to acquire user account.");
+            return;
+        }
+        Console.WriteLine($"Successfully acquired User ID. Continuing...");
+
         using var fileContent = new StreamContent(file.OpenRead());
         using var formContent = new MultipartFormDataContent
         {
             { fileContent, "formFile", file.Name }
         };
-        if (toUserCollection)
+
+        var userId = userAccount!.HomeAccountId.Identifier;
+        var userName = userAccount.Username;
+        using var userIdContent = new StringContent(userId);
+        using var userNameContent = new StringContent(userName);
+        formContent.Add(userIdContent, "userId");
+        formContent.Add(userNameContent, "userName");
+
+        if (chatCollectionId != Guid.Empty)
         {
-            Console.WriteLine("Uploading and parsing file to user collection...");
-            var userId = await AcquireUserIdAsync(config);
+            Console.WriteLine($"Uploading and parsing file to chat {chatCollectionId}...");
+            using var chatScopeContent = new StringContent("Chat");
+            using var chatCollectionIdContent = new StringContent(chatCollectionId.ToString());
+            formContent.Add(chatScopeContent, "documentScope");
+            formContent.Add(chatCollectionIdContent, "chatId");
 
-            if (userId != null)
-            {
-                using var userScopeContent = new StringContent("User");
-                using var userIdContent = new StringContent(userId);
-                formContent.Add(userScopeContent, "documentScope");
-                formContent.Add(userIdContent, "userId");
-
-                // Calling UploadAsync here to make sure disposable objects are still in scope.
-                await UploadAsync(formContent, config);
-            }
+            // Calling UploadAsync here to make sure disposable objects are still in scope.
+            await UploadAsync(formContent, accessToken!, config);
         }
         else
         {
@@ -128,7 +151,7 @@ public static class Program
             formContent.Add(globalScopeContent, "documentScope");
 
             // Calling UploadAsync here to make sure disposable objects are still in scope.
-            await UploadAsync(formContent, config);
+            await UploadAsync(formContent, accessToken!, config);
         }
     }
 
@@ -137,7 +160,10 @@ public static class Program
     /// </summary>
     /// <param name="multipartFormDataContent">The multipart form data content to send.</param>
     /// <param name="config">Configuration.</param>
-    private static async Task UploadAsync(MultipartFormDataContent multipartFormDataContent, Config config)
+    private static async Task UploadAsync(
+        MultipartFormDataContent multipartFormDataContent,
+        string accessToken,
+        Config config)
     {
         // Create a HttpClient instance and set the timeout to infinite since
         // large documents will take a while to parse.
@@ -149,6 +175,12 @@ public static class Program
         {
             Timeout = Timeout.InfiniteTimeSpan
         };
+        // Add required properties to the request header.
+        httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {accessToken}");
+        if (!string.IsNullOrEmpty(config.ApiKey))
+        {
+            httpClient.DefaultRequestHeaders.Add("x-sk-api-key", config.ApiKey);
+        }
 
         try
         {

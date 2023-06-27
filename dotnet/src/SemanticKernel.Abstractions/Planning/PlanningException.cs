@@ -5,7 +5,7 @@ using Microsoft.SemanticKernel.Diagnostics;
 
 namespace Microsoft.SemanticKernel.Planning;
 
-#pragma warning disable CA1032 // Implement standard exception constructors
+#pragma warning disable RCS1194 // Implement exception constructors
 
 /// <summary>
 /// Exception thrown for errors related to planning.
@@ -56,6 +56,7 @@ public class PlanningException : SKException
             ErrorCodes.InvalidGoal => "Invalid goal",
             ErrorCodes.InvalidPlan => "Invalid plan",
             ErrorCodes.InvalidConfiguration => "Invalid configuration",
+            ErrorCodes.CreatePlanError => "Create plan error",
             _ => $"Unknown error ({errorCode:G})",
         };
 
@@ -86,5 +87,10 @@ public class PlanningException : SKException
         /// Invalid configuration.
         /// </summary>
         InvalidConfiguration,
+
+        /// <summary>
+        /// Create plan error.
+        /// </summary>
+        CreatePlanError,
     }
 }

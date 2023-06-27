@@ -1,8 +1,12 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
 using System.Threading;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.SemanticKernel.Memory;
 using Microsoft.SemanticKernel.SkillDefinition;
 
@@ -11,18 +15,24 @@ namespace Microsoft.SemanticKernel.Orchestration;
 /// <summary>
 /// Semantic Kernel context.
 /// </summary>
+[DebuggerDisplay("{DebuggerDisplay,nq}")]
 public sealed class SKContext
 {
+    /// <summary>
+    /// The culture currently associated with this context.
+    /// </summary>
+    private CultureInfo _culture;
+
     /// <summary>
     /// Print the processed input, aka the current data after any processing occurred.
     /// </summary>
     /// <returns>Processed input, aka result</returns>
     public string Result => this.Variables.ToString();
 
-    // /// <summary>
-    // /// Whether an error occurred while executing functions in the pipeline.
-    // /// </summary>
-    // public bool ErrorOccurred => this.Variables.ErrorOccurred;
+    /// <summary>
+    /// Whether all the context variables are trusted or not.
+    /// </summary>
+    public bool IsTrusted => this.Variables.IsAllTrusted();
 
     /// <summary>
     /// Whether an error occurred while executing functions in the pipeline.
@@ -40,9 +50,24 @@ public sealed class SKContext
     public Exception? LastException { get; private set; }
 
     /// <summary>
+    /// When a prompt is processed, aka the current data after any model results processing occurred.
+    /// (One prompt can have multiple results).
+    /// </summary>
+    public IReadOnlyCollection<ModelResult> ModelResults { get; set; } = Array.Empty<ModelResult>();
+
+    /// <summary>
     /// The token to monitor for cancellation requests.
     /// </summary>
     public CancellationToken CancellationToken { get; }
+
+    /// <summary>
+    /// The culture currently associated with this context.
+    /// </summary>
+    public CultureInfo Culture
+    {
+        get => this._culture;
+        set => this._culture = value ?? CultureInfo.CurrentCulture;
+    }
 
     /// <summary>
     /// Shortcut into user data, access variables by name
@@ -117,17 +142,34 @@ public sealed class SKContext
     /// <param name="logger">Logger for operations in context.</param>
     /// <param name="cancellationToken">Optional cancellation token for operations in context.</param>
     public SKContext(
-        ContextVariables variables,
-        ISemanticTextMemory memory,
-        IReadOnlySkillCollection? skills,
-        ILogger logger,
+        ContextVariables? variables = null,
+        ISemanticTextMemory? memory = null,
+        IReadOnlySkillCollection? skills = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
-        this.Variables = variables;
-        this.Memory = memory;
-        this.Skills = skills;
-        this.Log = logger;
+        this.Variables = variables ?? new();
+        this.Memory = memory ?? NullMemory.Instance;
+        this.Skills = skills ?? NullReadOnlySkillCollection.Instance;
+        this.Log = logger ?? NullLogger.Instance;
         this.CancellationToken = cancellationToken;
+        this._culture = CultureInfo.CurrentCulture;
+    }
+
+    /// <summary>
+    /// Make all the variables stored in the context untrusted.
+    /// </summary>
+    public void UntrustAll()
+    {
+        this.Variables.UntrustAll();
+    }
+
+    /// <summary>
+    /// Make the result untrusted.
+    /// </summary>
+    public void UntrustResult()
+    {
+        this.Variables.UntrustInput();
     }
 
     /// <summary>
@@ -138,5 +180,55 @@ public sealed class SKContext
     public override string ToString()
     {
         return this.ErrorOccurred ? $"Error: {this.LastErrorDescription}" : this.Result;
+    }
+
+    /// <summary>
+    /// Create a clone of the current context, using the same kernel references (memory, skills, logger)
+    /// and a new set variables, so that variables can be modified without affecting the original context.
+    /// </summary>
+    /// <returns>A new context copied from the current one</returns>
+    public SKContext Clone()
+    {
+        return new SKContext(
+            variables: this.Variables.Clone(),
+            memory: this.Memory,
+            skills: this.Skills,
+            logger: this.Log,
+            cancellationToken: this.CancellationToken)
+        {
+            Culture = this.Culture,
+            ErrorOccurred = this.ErrorOccurred,
+            LastErrorDescription = this.LastErrorDescription,
+            LastException = this.LastException,
+        };
+    }
+
+    [DebuggerBrowsable(DebuggerBrowsableState.Never)]
+    private string DebuggerDisplay
+    {
+        get
+        {
+            if (this.ErrorOccurred)
+            {
+                return $"Error: {this.LastErrorDescription}";
+            }
+
+            string display = this.Variables.DebuggerDisplay;
+
+            if (this.Skills is IReadOnlySkillCollection skills)
+            {
+                var view = skills.GetFunctionsView();
+                display += $", Skills = {view.NativeFunctions.Count + view.SemanticFunctions.Count}";
+            }
+
+            if (this.Memory is ISemanticTextMemory memory && memory is not NullMemory)
+            {
+                display += $", Memory = {memory.GetType().Name}";
+            }
+
+            display += $", Culture = {this.Culture.EnglishName}";
+
+            return display;
+        }
     }
 }
